@@ -1,9 +1,12 @@
 import Phaser from 'phaser';
-import type { HudState, LevelConfig } from '../types/game';
+import type { EquipmentKind, HudState, LevelConfig, PlacedEquipment, SelectedInfo } from '../types/game';
 import { Economy } from '../systems/Economy';
 import { LogRegistry } from '../systems/LogRegistry';
 import { TreeSupply } from '../systems/TreeSupply';
+import { EQUIPMENT_CATALOG, EquipmentManager, GRID_SNAP_PX, REASON_TEXT, ROTATION_STEPS, footprintBounds, statLines, statsOf, upgradePreview } from '../systems/Equipment';
+import { conveyorVelocityDelta, fanAcceleration, angleOf, trampolineLaunchVelocity } from '../systems/EquipmentEffects';
 import { TEXTURE_LOG, TEXTURE_TREE, generateTextures } from './assets';
+import { drawEquipment, drawGrid, drawLake, drawPreview, drawRestrictedZone, drawSelection } from './EquipmentView';
 
 /** Fixed simulation step. Gameplay never depends on render frame rate (spec section 3). */
 const STEP_MS = 1000 / 60;
@@ -27,6 +30,8 @@ export interface SceneInit {
  *   emits  'hud'        (state: HudState)   whenever something visible changes
  *   listens 'cmd:pause'  toggle pause
  *   listens 'cmd:reset'  restart this attempt (including cash)
+ *   listens 'cmd:build'   (kind | null) enter/leave build mode for a tool
+ *   listens 'cmd:upgrade' / 'cmd:remove' / 'cmd:undo'  act on the selected tool / last build action
  */
 export class LogworksScene extends Phaser.Scene {
   private level!: LevelConfig;
@@ -48,6 +53,22 @@ export class LogworksScene extends Phaser.Scene {
   private woodBar!: Phaser.GameObjects.Graphics;
   private deliveredCount = 0;
 
+  // --- Phase 2: equipment ---
+  private equipment!: EquipmentManager;
+  private buildKind: EquipmentKind | null = null;
+  private buildRotation = 0;
+  private selectedId: number | null = null;
+  private equipGraphics!: Phaser.GameObjects.Graphics;
+  private previewGraphics!: Phaser.GameObjects.Graphics;
+  private equipBodies = new Map<number, MatterJS.BodyType>();
+  /** Logger state per tool id: ms accumulated toward the next chop, and a human-readable status. */
+  private loggerState = new Map<number, { elapsedMs: number; status: string; workingUntilMs: number }>();
+  /** Trampoline pad compression animation, in remaining simulation steps. */
+  private padCompress = new Map<number, number>();
+  /** Step at which each log last bounced on a trampoline, so one landing launches once, not every step. */
+  private lastLaunchStep = new Map<number, number>();
+  private stepCount = 0;
+
   constructor() {
     super('LogworksScene');
   }
@@ -65,6 +86,8 @@ export class LogworksScene extends Phaser.Scene {
     this.buildWorld();
     this.buildTree();
     this.buildFurnaceVisuals();
+    this.equipGraphics = this.add.graphics().setDepth(6);
+    this.previewGraphics = this.add.graphics().setDepth(25);
     this.dragGraphics = this.add.graphics().setDepth(20);
     this.registerInput();
 
@@ -75,12 +98,24 @@ export class LogworksScene extends Phaser.Scene {
     const onReset = (): void => {
       this.scene.restart({ level: this.level });
     };
+    const onBuild = (kind: EquipmentKind | null): void => this.setBuildKind(kind);
+    const onUpgrade = (): void => this.upgradeSelected();
+    const onRemove = (): void => this.removeSelected();
+    const onUndo = (): void => this.undoLast();
     this.game.events.on('cmd:pause', onPause);
     this.game.events.on('cmd:reset', onReset);
+    this.game.events.on('cmd:build', onBuild);
+    this.game.events.on('cmd:upgrade', onUpgrade);
+    this.game.events.on('cmd:remove', onRemove);
+    this.game.events.on('cmd:undo', onUndo);
     // Remove listeners when the scene restarts so resets never stack duplicate handlers (spec section 19).
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.game.events.off('cmd:pause', onPause);
       this.game.events.off('cmd:reset', onReset);
+      this.game.events.off('cmd:build', onBuild);
+      this.game.events.off('cmd:upgrade', onUpgrade);
+      this.game.events.off('cmd:remove', onRemove);
+      this.game.events.off('cmd:undo', onUndo);
     });
 
     this.emitHud();
@@ -97,6 +132,7 @@ export class LogworksScene extends Phaser.Scene {
       }
     }
     this.drawDragIndicator();
+    this.drawEquipmentLayer();
     this.emitHud();
   }
 
@@ -105,8 +141,11 @@ export class LogworksScene extends Phaser.Scene {
   /** One fixed 60Hz tick: everything that affects gameplay state happens here. */
   private stepSimulation(): void {
     this.simTimeMs += STEP_MS;
+    this.stepCount++;
     this.tree.update(this.simTimeMs);
+    this.runLoggers();
     this.applyDragForce();
+    this.applyEquipmentEffects();
     this.matter.world.step(STEP_MS);
     this.checkLogsForDeliveryOrLoss();
   }
@@ -155,6 +194,10 @@ export class LogworksScene extends Phaser.Scene {
       const { x, y } = body.position;
       if (x >= left && x <= right && y >= top && y <= bottom) {
         this.deliverLog(id, x, y);
+      } else if (this.isInLake(x, y)) {
+        // Water: the log is lost for good. markLost makes later delivery/reward impossible.
+        if (this.registry_.stateOf(id) === 'active') this.floatText(x, this.level.groundTopY - 10, 'Splash!', '#9ad7ff');
+        this.loseLog(id);
       } else if (y > worldBottom) {
         this.loseLog(id);
       }
@@ -186,12 +229,24 @@ export class LogworksScene extends Phaser.Scene {
 
   private registerInput(): void {
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+      if (pointer.rightButtonDown() && this.buildKind) {
+        this.setBuildKind(null);
+        return;
+      }
       if (this.paused || !pointer.leftButtonDown()) return;
+      if (this.buildKind) {
+        this.tryPlaceAtPointer(pointer.worldX, pointer.worldY);
+        return;
+      }
       // Logs take priority over the tree so a log lying in front of the trunk can still be grabbed.
       const logId = this.logIdAt(pointer.worldX, pointer.worldY);
       if (logId !== null) {
         this.grabbedLogId = logId; // Only one log can be grabbed at a time.
+        return;
       }
+      const hit = this.equipmentAt(pointer.worldX, pointer.worldY);
+      if (hit !== null) this.selectedId = hit;
+      else if (!this.isTreeAt(pointer.worldX, pointer.worldY)) this.selectedId = null;
     });
     const release = (): void => {
       this.grabbedLogId = null; // Releasing keeps the log's current velocity (natural momentum).
@@ -201,6 +256,15 @@ export class LogworksScene extends Phaser.Scene {
 
     this.input.keyboard?.on('keydown-P', () => this.togglePause());
     this.input.keyboard?.on('keydown-R', () => this.scene.restart({ level: this.level }));
+    this.input.keyboard?.on('keydown-E', () => {
+      if (this.buildKind) this.buildRotation = (this.buildRotation + 1) % ROTATION_STEPS;
+    });
+    this.input.keyboard?.on('keydown-ESC', () => {
+      if (this.buildKind) this.setBuildKind(null);
+      else this.selectedId = null;
+    });
+    this.input.keyboard?.on('keydown-DELETE', () => this.removeSelected());
+    this.input.keyboard?.on('keydown-Z', () => this.undoLast());
   }
 
   private logIdAt(worldX: number, worldY: number): number | null {
@@ -257,6 +321,15 @@ export class LogworksScene extends Phaser.Scene {
     this.logImages = new Map();
     this.grabbedLogId = null;
     this.deliveredCount = 0;
+    this.equipment = new EquipmentManager(this.level, this.economy);
+    this.buildKind = null;
+    this.buildRotation = 0;
+    this.selectedId = null;
+    this.equipBodies = new Map();
+    this.loggerState = new Map();
+    this.padCompress = new Map();
+    this.lastLaunchStep = new Map();
+    this.stepCount = 0;
   }
 
   private buildWorld(): void {
@@ -265,14 +338,18 @@ export class LogworksScene extends Phaser.Scene {
     this.matter.world.setGravity(0, gravityY);
     this.cameras.main.setBackgroundColor('#bfe6f5');
 
-    // Floor is two slabs with the furnace pit between them.
-    const pitLeft = furnace.pit.x - furnace.pit.width / 2;
-    const pitRight = furnace.pit.x + furnace.pit.width / 2;
+    // The floor is split into slabs around every gap (lakes and the furnace pit).
+    const gaps = [...this.level.lakes, furnace.pit].map((r) => ({ left: r.x - r.width / 2, right: r.x + r.width / 2 })).sort((p, q) => p.left - q.left);
     const floorHeight = world.height - groundTopY;
-    this.addStaticSlab(0, pitLeft, groundTopY, floorHeight);
-    this.addStaticSlab(pitRight, world.width, groundTopY, floorHeight);
-    // The pit's bottom is deliberately open: logs are deleted on delivery, not by hitting a floor.
-    // Side walls of the pit are the slab edges above.
+    let cursor = 0;
+    for (const gap of gaps) {
+      if (gap.left > cursor) this.addStaticSlab(cursor, gap.left, groundTopY, floorHeight);
+      cursor = gap.right;
+    }
+    if (cursor < world.width) this.addStaticSlab(cursor, world.width, groundTopY, floorHeight);
+    // Gap bottoms are deliberately open: logs are deleted on delivery/loss, not by hitting a floor.
+    for (const lake of this.level.lakes) drawLake(this, lake, groundTopY);
+    for (const zone of this.level.restrictedZones) drawRestrictedZone(this, zone);
   }
 
   private addStaticSlab(left: number, right: number, topY: number, height: number): void {
@@ -292,7 +369,7 @@ export class LogworksScene extends Phaser.Scene {
     // Generous hit area (spec section 17: no pixel-perfect clicks).
     treeImage.setInteractive({ useHandCursor: true });
     treeImage.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
-      if (!pointer.leftButtonDown()) return;
+      if (!pointer.leftButtonDown() || this.buildKind) return;
       // If a log is under the cursor the generic pointerdown handler grabs it instead.
       if (this.logIdAt(pointer.worldX, pointer.worldY) !== null) return;
       this.tweens.add({ targets: treeImage, angle: { from: -2, to: 2 }, duration: 60, yoyo: true, repeat: 1, onComplete: () => treeImage.setAngle(0) });
@@ -331,6 +408,209 @@ export class LogworksScene extends Phaser.Scene {
     image.setAngularVelocity((Math.random() - 0.5) * 0.1);
     this.logImages.set(id, image);
     this.logBodies.set(id, image.body as MatterJS.BodyType);
+  }
+
+  // ---------------------------------------------------------------- equipment
+
+  private isInLake(x: number, y: number): boolean {
+    return this.level.lakes.some((l) => Math.abs(x - l.x) <= l.width / 2 && Math.abs(y - l.y) <= l.height / 2);
+  }
+
+  private isTreeAt(x: number, y: number): boolean {
+    const { tree } = this.level;
+    return Math.abs(x - tree.x) < 60 && y > tree.y - 200 && y < tree.y;
+  }
+
+  private snap(v: number): number {
+    return Math.round(v / GRID_SNAP_PX) * GRID_SNAP_PX;
+  }
+
+  private setBuildKind(kind: EquipmentKind | null): void {
+    // Clicking the active shop button again cancels build mode.
+    this.buildKind = kind === this.buildKind ? null : kind;
+    if (this.buildKind) this.selectedId = null;
+  }
+
+  private tryPlaceAtPointer(worldX: number, worldY: number): void {
+    if (!this.buildKind) return;
+    const result = this.equipment.tryPlace(this.buildKind, this.snap(worldX), this.snap(worldY), this.buildRotation);
+    if (!result.ok) {
+      // A refused placement never charges (EquipmentManager only spends after validation).
+      this.showMessage(REASON_TEXT[result.reason], 1800);
+      return;
+    }
+    this.syncEquipment();
+    this.floatText(result.item.x, result.item.y - 40, `-$${EQUIPMENT_CATALOG[result.item.kind].price}`, '#ff9aa2');
+    // Stay in build mode so several tools can be placed quickly; Esc / right-click leaves it.
+  }
+
+  private equipmentAt(x: number, y: number): number | null {
+    for (const item of this.equipment.list()) {
+      const b = footprintBounds(item.kind, item.x, item.y, item.rotationStep);
+      if (x >= b.left - 4 && x <= b.right + 4 && y >= b.top - 4 && y <= b.bottom + 4) return item.id;
+    }
+    return null;
+  }
+
+  private upgradeSelected(): void {
+    if (this.selectedId === null) return;
+    const result = this.equipment.tryUpgrade(this.selectedId);
+    if (result.ok) {
+      const item = this.equipment.get(this.selectedId);
+      if (item) this.floatText(item.x, item.y - 40, 'Upgraded!', '#ffd166');
+    } else {
+      this.showMessage(result.reason === 'cash' ? 'Not enough cash to upgrade' : result.reason === 'max' ? 'Already at max upgrades' : 'Nothing selected', 1500);
+    }
+  }
+
+  private removeSelected(): void {
+    if (this.selectedId === null) return;
+    const item = this.equipment.get(this.selectedId);
+    const refund = this.equipment.remove(this.selectedId);
+    if (refund !== null && item) this.floatText(item.x, item.y - 40, `+$${refund}`, '#ffd166');
+    this.selectedId = null;
+    this.syncEquipment();
+  }
+
+  private undoLast(): void {
+    const result = this.equipment.undo();
+    this.showMessage(result.ok ? result.text : result.reason, 1500);
+    if (this.selectedId !== null && !this.equipment.get(this.selectedId)) this.selectedId = null;
+    this.syncEquipment();
+  }
+
+  /** Reconcile physics bodies and per-tool state with the manager's list after any build action. */
+  private syncEquipment(): void {
+    const live = new Map<number, PlacedEquipment>(this.equipment.list().map((i) => [i.id, i]));
+    for (const [id, body] of [...this.equipBodies]) {
+      if (!live.has(id)) {
+        this.matter.world.remove(body);
+        this.equipBodies.delete(id);
+      }
+    }
+    for (const id of [...this.loggerState.keys()]) if (!live.has(id)) this.loggerState.delete(id);
+    for (const [id, item] of live) {
+      if (item.kind === 'logger' && !this.loggerState.has(id)) this.loggerState.set(id, { elapsedMs: 0, status: 'Working', workingUntilMs: 0 });
+      // Conveyors and trampolines are solid so logs rest on them; fans and loggers are not.
+      if ((item.kind === 'conveyor' || item.kind === 'trampoline') && !this.equipBodies.has(id)) {
+        const spec = EQUIPMENT_CATALOG[item.kind];
+        const body = this.matter.add.rectangle(item.x, item.y, spec.width, spec.height, {
+          isStatic: true,
+          angle: angleOf(item.rotationStep),
+          friction: item.kind === 'conveyor' ? 1 : 0.2,
+          label: `${item.kind}-${id}`,
+        });
+        this.equipBodies.set(id, body as MatterJS.BodyType);
+      }
+    }
+  }
+
+  /** Per-step logger logic: accumulate simulation time, then chop through the same rules as a manual click. */
+  private runLoggers(): void {
+    for (const item of this.equipment.list()) {
+      if (item.kind !== 'logger') continue;
+      const state = this.loggerState.get(item.id);
+      if (!state) continue;
+      const interval = statsOf(item).intervalMs;
+      state.elapsedMs = Math.min(state.elapsedMs + STEP_MS, interval);
+      if (state.elapsedMs < interval) {
+        state.status = 'Working';
+        continue;
+      }
+      if (this.registry_.activeCount() >= this.level.maxActiveLogs) {
+        state.status = 'Waiting: log limit reached';
+      } else if (this.tree.blockedReason(this.simTimeMs) === 'empty') {
+        state.status = 'Idle: tree is out of wood';
+      } else if (this.tree.harvest(this.simTimeMs)) {
+        this.spawnLog();
+        state.elapsedMs = 0;
+        state.status = 'Working';
+        state.workingUntilMs = this.simTimeMs + 400;
+      }
+    }
+  }
+
+  /** Conveyors, fans and trampolines act on every active log once per fixed step. */
+  private applyEquipmentEffects(): void {
+    const items = this.equipment.list();
+    if (items.length === 0) return;
+    for (const [logId, body] of this.logBodies) {
+      for (const item of items) {
+        if (item.kind === 'logger') continue;
+        const stats = statsOf(item);
+        const spec = EQUIPMENT_CATALOG[item.kind];
+        const pos = { x: body.position.x, y: body.position.y };
+        const vel = { x: body.velocity.x, y: body.velocity.y };
+        if (item.kind === 'conveyor') {
+          const d = conveyorVelocityDelta(item, spec.width, spec.height, stats.speed, pos, vel);
+          if (d) this.matter.body.setVelocity(body, { x: vel.x + d.x, y: vel.y + d.y });
+        } else if (item.kind === 'fan') {
+          const a = fanAcceleration(item, stats.range, stats.force, pos);
+          if (a) {
+            const scale = body.mass / (STEP_MS * STEP_MS); // force = mass * accel / dt^2 (see applyDragForce)
+            this.matter.body.applyForce(body, body.position, { x: a.x * scale, y: a.y * scale });
+          }
+        } else {
+          const lastStep = this.lastLaunchStep.get(logId) ?? -Infinity;
+          if (this.stepCount - lastStep < 20) continue; // debounce: one landing = one launch
+          const v = trampolineLaunchVelocity(item, spec.width, spec.height, stats.launchSpeed, pos, vel);
+          if (v) {
+            this.matter.body.setVelocity(body, v);
+            this.lastLaunchStep.set(logId, this.stepCount);
+            this.padCompress.set(item.id, 10);
+          }
+        }
+      }
+    }
+    for (const [id, steps] of this.padCompress) {
+      if (steps <= 1) this.padCompress.delete(id);
+      else this.padCompress.set(id, steps - 1);
+    }
+  }
+
+  private drawEquipmentLayer(): void {
+    const g = this.equipGraphics;
+    g.clear();
+    for (const item of this.equipment.list()) {
+      const state = this.loggerState.get(item.id);
+      drawEquipment(g, item.kind, item.x, item.y, item.rotationStep, item.tier, {
+        alpha: 1,
+        animMs: this.simTimeMs,
+        compress: (this.padCompress.get(item.id) ?? 0) / 10,
+        working: state ? this.simTimeMs < state.workingUntilMs : false,
+      });
+    }
+    const selected = this.selectedId === null ? undefined : this.equipment.get(this.selectedId);
+    if (selected) drawSelection(g, selected);
+
+    const p = this.previewGraphics;
+    p.clear();
+    if (!this.buildKind) return;
+    drawGrid(p, this.level.world.width, this.level.groundTopY, GRID_SNAP_PX);
+    const pointer = this.input.activePointer;
+    const x = this.snap(pointer.worldX);
+    const y = this.snap(pointer.worldY);
+    const reason = this.equipment.checkPlacement(this.buildKind, x, y, this.buildRotation);
+    drawPreview(p, this.buildKind, x, y, this.buildRotation, reason === null);
+  }
+
+  private selectedInfo(): SelectedInfo | null {
+    const item = this.selectedId === null ? undefined : this.equipment.get(this.selectedId);
+    if (!item) return null;
+    const preview = upgradePreview(item);
+    const logger = this.loggerState.get(item.id);
+    return {
+      id: item.id,
+      kind: item.kind,
+      label: EQUIPMENT_CATALOG[item.kind].label,
+      tier: item.tier,
+      maxTier: EQUIPMENT_CATALOG[item.kind].upgradeCosts.length,
+      statLines: statLines(item),
+      upgradeLine: preview ? preview.line : null,
+      upgradeCost: preview ? preview.cost : null,
+      refund: this.equipment.refundFor(item.id),
+      status: logger ? logger.status : '',
+    };
   }
 
   // ---------------------------------------------------------------- feedback / HUD
@@ -383,6 +663,9 @@ export class LogworksScene extends Phaser.Scene {
       woodCapacity: this.tree.capacity,
       paused: this.paused,
       message: this.message,
+      buildKind: this.buildKind,
+      canUndo: this.equipment.canUndo(),
+      selected: this.selectedInfo(),
     };
     this.game.events.emit('hud', state);
   }

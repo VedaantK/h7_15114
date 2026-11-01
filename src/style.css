@@ -1,6 +1,6 @@
 :root { --bg: #102d2e; --panel: #1b4a4c; --text: #f3efe0; --accent: #ffd166; }
 * { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; }
+html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; }
 #app { display: flex; flex-direction: column; height: 100%; }
 .hud { display: flex; align-items: center; gap: 16px; padding: 8px 14px; background: var(--panel); flex-wrap: wrap; }
 .hud h1 { font-size: 18px; margin: 0 8px 0 0; }
@@ -13,3 +13,12 @@ button:focus-visible { outline: 3px solid #fff; outline-offset: 2px; }
 #game { flex: 1; min-height: 0; }
 dialog { background: var(--panel); color: var(--text); border: 2px solid var(--accent); border-radius: 10px; max-width: 460px; }
 dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
+
+.shopbar { display: flex; align-items: center; gap: 10px; padding: 6px 14px; background: #153b3d; flex-wrap: wrap; font-size: 14px; }
+.shop { display: flex; gap: 6px; }
+.shop button { background: #3f7f81; color: var(--text); }
+.shop button.active { background: var(--accent); color: #2b1d00; outline: 2px solid #fff; }
+.shop button.unaffordable { opacity: 0.6; }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+.panel { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 260px; flex-wrap: wrap; }
+.panel .next { color: #cfe8e0; font-size: 13px; }

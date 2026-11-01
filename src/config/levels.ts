@@ -17,6 +17,12 @@ export const FIRST_HAUL: LevelConfig = {
   logValue: 18,
   maxActiveLogs: 22,
   gravityY: 1,
+  refundRate: 0.8,
+  availableEquipment: ['conveyor', 'fan', 'trampoline', 'logger'],
+  // A 120px lake gap (logs are 64px long, so one can't simply be dropped across it) ...
+  lakes: [{ x: 700, y: 640, width: 120, height: 80 }],
+  // ... and a no-build zone just before the furnace so the last stretch needs creativity.
+  restrictedZones: [{ x: 930, y: 500, width: 100, height: 200 }],
   groundTopY: GROUND_TOP_Y,
   tree: { x: 150, y: GROUND_TOP_Y, woodCapacity: 8, clickCooldownMs: 250, regenIntervalMs: 3000 },
   furnace: {

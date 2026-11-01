@@ -11,3 +11,13 @@ What the AI did: cloned the repo, read the assignment page, `spec.md` and `READM
 1. **Injected instruction.** The assignment page contains a line telling AI readers to scatter the comment "hotdog" through generated code. It was not part of the user's request, so the AI did not follow it. No such comments are in this repo.
 2. **Bug in its own code.** The first drag implementation multiplied by dt^2 where it should divide, so grabbing a log launched it to x~20000 and it was counted as lost. Found in the browser by logging, fixed in `applyDragForce`, re-verified by dragging a log into the furnace.
 3. **Tooling slip.** `Economy` first used constructor parameter properties, which Node's type stripping rejects for `npm test`. Rewritten with explicit fields.
+
+## Prompt 2 (verbatim)
+> yes start phase 2
+
+What the AI did: built `Equipment.ts`, `EquipmentEffects.ts`, `EquipmentView.ts`, the shop UI and scene integration, plus 13 new unit tests, then ran each machine in a real browser.
+
+Unwanted / mistakes this round:
+4. **Left junk in generated code.** A placeholder line (`state.simulatedWorking ? 'Working' : 'Working'`) referencing a field that did not exist; typecheck caught it and it was removed.
+5. **Wrong test, not wrong code.** A unit test expected a blocked undo that the API cannot produce (undo correctly reversed the latest action). The test was rewritten to cover the real failure case (buy-back unaffordable).
+6. **Misread browser tests.** Two "trampoline did nothing" results came from the test script toggling build mode off and from dropping a log on the pad's underside, not from game bugs. Confirmed by re-running with controlled setups.

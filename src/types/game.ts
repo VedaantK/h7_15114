@@ -42,6 +42,22 @@ export interface DragConfig {
   maxAccel: number;
 }
 
+/** Buildable tool types (spec section 9). */
+export type EquipmentKind = 'conveyor' | 'fan' | 'trampoline' | 'logger';
+
+/** A tool the player has bought and placed. `spent` = price + upgrades, the basis for refunds. */
+export interface PlacedEquipment {
+  id: number;
+  kind: EquipmentKind;
+  x: number;
+  y: number;
+  /** 0..7, each step is 45 degrees clockwise. Step 0 points right (conveyor/fan) or up (trampoline). */
+  rotationStep: number;
+  /** Number of upgrades bought, 0..3. */
+  tier: number;
+  spent: number;
+}
+
 export interface LevelConfig {
   id: string;
   title: string;
@@ -52,12 +68,33 @@ export interface LevelConfig {
   /** Global cap on simultaneous active logs. */
   maxActiveLogs: number;
   gravityY: number;
+  /** Fraction of `spent` returned when removing equipment (spec section 8: default 0.8). */
+  refundRate: number;
+  availableEquipment: EquipmentKind[];
+  /** Gaps in the floor that destroy logs and forbid building (full column). Center-based rects. */
+  lakes: Rect[];
+  /** Areas where building is forbidden but logs move freely. */
+  restrictedZones: Rect[];
   groundTopY: number;
   tree: TreeConfig;
   /** The furnace is a pit in the floor. `mouth` is the rect where a log counts as delivered. */
   furnace: { pit: Rect; mouth: Rect };
   log: LogPhysicsConfig;
   drag: DragConfig;
+}
+
+/** What the HUD shows about the currently selected placed tool. */
+export interface SelectedInfo {
+  id: number;
+  kind: EquipmentKind;
+  label: string;
+  tier: number;
+  maxTier: number;
+  statLines: string[];
+  upgradeLine: string | null;
+  upgradeCost: number | null;
+  refund: number;
+  status: string;
 }
 
 /** Snapshot pushed from the scene to the HTML HUD (see main.ts). */
@@ -70,4 +107,7 @@ export interface HudState {
   woodCapacity: number;
   paused: boolean;
   message: string;
+  buildKind: EquipmentKind | null;
+  canUndo: boolean;
+  selected: SelectedInfo | null;
 }

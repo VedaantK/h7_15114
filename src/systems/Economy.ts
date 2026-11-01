@@ -38,6 +38,11 @@ export class Economy {
     return true;
   }
 
+  /** Add cash that is not a delivery reward (refunds, undo). */
+  earn(amount: number): void {
+    if (amount > 0) this.balance += amount;
+  }
+
   reset(): void {
     this.balance = this.startingCash;
     this.rewardedLogIds.clear();
