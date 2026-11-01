@@ -1,3 +1,54 @@
+# STATUS OF THIS REPO (inherited-code audit, verified 2026-11-01)
+
+**Read this first. It supersedes the phase notes further down.**
+
+Original author: ISamanie (design, spec, README, config). Phase 2 build: Vedaant Kulkarni, with Claude as the coding assistant (see `prompt_log.md`).
+
+## What the inherited commit actually contained
+The inherited commit (`e64f54c`) had `spec.md`, `README.md`, `package.json`, `tsconfig.json`, `index.html` and `package-lock.json`, but **no `src/` or `tests/` directory**. The README below describes Phases 1-6 as implemented (23 tests, a level creator, a 3-level campaign), and none of that code was in the repo. Treat the Phase 2-6 sections below as the author's *plan*, not as a description of existing code.
+
+## What exists now (Phase 1 only, built from the README's own module map)
+Verified by `npm run typecheck`, `npm test` (8 passing unit tests), `npm run build`, and a manual browser run (Playwright, Chromium):
+- Click the tree to spawn a log (250 ms cooldown, 8 wood, regrows 1 per 3 s of simulation time, 22 active-log cap with an on-screen message).
+- Click and drag a single log. The pull is a force-limited damped spring (`drag` in `src/config/levels.ts`). It was pulled straight down into the floor without passing through, so collisions still win.
+- Furnace pit on the right. A log whose center enters the delivery mouth is removed and pays $18 exactly once (`LogRegistry` is the gate, `Economy` the second check).
+- Fixed 60 Hz simulation steps, simulation clock, pause (`P`), reset (`R`), help dialog.
+- Logs falling out of the world are marked lost and removed.
+
+Not browser-tested: pause/reset buttons, the help dialog, the 22-log cap message, tab-inactive behavior, 60 FPS under load.
+
+## Code map
+| File | Responsibility |
+| --- | --- |
+| `src/config/levels.ts` | Level data: sizes, cash, physics and drag tuning. Add new levels here. |
+| `src/types/game.ts` | Shared types (`LevelConfig`, `HudState`, `LogState`). |
+| `src/systems/TreeSupply.ts` | Harvest cooldown, wood capacity, regrowth. Pure logic, takes simulation time. |
+| `src/systems/LogRegistry.ts` | Unique log IDs and active/delivered/lost states (forward-only). |
+| `src/systems/Economy.ts` | Cash, exactly-once delivery reward, `trySpend`. |
+| `src/game/LogworksScene.ts` | Phaser/Matter scene: world, input, drag force, delivery check, HUD events. |
+| `src/game/assets.ts` | Procedurally drawn textures (no external assets). |
+| `src/main.ts`, `src/style.css` | HTML HUD around the canvas; talks to the scene via `game.events`. |
+| `tests/systems.test.mjs` | Node tests for the framework-free systems (`npm test`). Systems avoid TS-only syntax such as parameter properties so Node can run them directly. |
+
+## Acceptance criteria status (spec section 20)
+Met (checked in browser or unit test): tree click creates a log; gravity/collisions consistent; dragging is force-limited and moves one log; furnace reward exactly once; lost logs cannot be rewarded (unit test).
+**Not built yet:** automated logging, equipment shop/placement/upgrades/removal/undo, lakes and restricted zones, rolling-throughput multiplier, objectives, birds/fish, levels 2 and 3, campaign save/progression, level editor, audio, main menu. Some have `TODO(phase N)` markers in the code.
+
+## Known issues and traps
+- `LogworksScene` sets `matter.world.autoUpdate = false` and steps Matter by hand; do not also let Phaser auto-step.
+- Drag acceleration is in px/step^2 (Matter units). Matter's velocity change is `force / mass * dt^2`, so force = `mass * accel / dt^2`. An earlier version had this inverted and threw logs to x~20000.
+- Furnace delivery is a position check on the log's center, not a collision event.
+- No favicon (harmless 404 in the console).
+
+## Suggested next steps (priority order)
+1. Equipment shop and placement (conveyor, trampoline, fan); invalid placements never charge cash.
+2. Rolling one-second throughput multiplier in `Economy.rewardDelivery`.
+3. Objectives framework and the other two levels.
+4. Lake hazards and restricted zones; birds and fish.
+5. Persistence, then the level editor.
+
+---
+
 # Logworks — Phase 5: Level Creator (current state)
 
 This archive contains the combined Phase 1–5 source project. Earlier phase notes below are historical and not a current feature list. Phase 6 has **not** begun.
