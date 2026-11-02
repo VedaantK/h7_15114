@@ -2,7 +2,7 @@
 
 **Read this first. It supersedes the phase notes further down.**
 
-Original author: ISamanie (design, spec, README, config). Phase 2 build: Vedaant Kulkarni, with Claude as the coding assistant (see `prompt_log.md`).
+Original author: ISamanie (design, spec, README, config). Phase 2 build: Vedaant (GitHub: VedaantK), with Claude as the coding assistant (see `prompt_log.md`).
 
 ## What the inherited commit actually contained
 The inherited commit (`e64f54c`) had `spec.md`, `README.md`, `package.json`, `tsconfig.json`, `index.html` and `package-lock.json`, but **no `src/` or `tests/` directory**. The README below describes Phases 1-6 as implemented (23 tests, a level creator, a 3-level campaign), and none of that code was in the repo. Treat the Phase 2-6 sections below as the author's *plan*, not as a description of existing code.
@@ -49,10 +49,50 @@ Not browser-tested: the streak multiplier (unit-tested only; I could not hand-de
 | `src/main.ts`, `src/style.css` | HTML HUD around the canvas; talks to the scene via `game.events`. |
 | `tests/systems.test.mjs`, `tests/equipment.test.mjs`, `tests/throughput.test.mjs` | Node tests for the framework-free systems (`npm test`). Systems avoid TS-only syntax such as parameter properties so Node can run them directly. |
 
-## Acceptance criteria status (spec section 20)
-Met (checked in browser or unit test): tree click creates a log; automated logging creates logs at the configured interval; gravity/collisions consistent; dragging is force-limited and moves one log; equipment can be purchased, placed, selected, upgraded and removed; invalid placements do not deduct money; lakes and restricted areas prevent construction; furnace reward exactly once; lost logs cannot be rewarded (unit test).
-Partially met: "equipment can be selected, upgraded, removed" is verified by unit tests and a manual look at the panel, but the Upgrade/Remove buttons were not clicked in a browser run. Tools cannot be moved after placing (remove and re-place instead, or rotate in place); the spec lists repositioning. Conveyors have no "maximum load" and fans no adjustable range besides upgrades.
-**Not built yet:** objectives, birds/fish, levels 2 and 3, campaign save/progression, level editor, audio, main menu. Some have `TODO(phase N)` markers in the code.
+## Acceptance criteria report (the author's spec section 20, item by item)
+
+Status key: **Met** = checked by me in a real browser run and/or unit tests; **Partial** = some of it works or only unit-tested; **Not met** = not built. "Browser" means I ran it in Chromium via Playwright; "tests" means `npm test` (31 tests). I note where a criterion was ambiguous.
+
+| # | Criterion | Status | Notes |
+| --- | --- | --- | --- |
+| **Core gameplay** | | | |
+| 1 | Clicking a tree creates a log | Met | Browser. 250 ms cooldown, 8-wood capacity, regrows over time. |
+| 2 | Automated logging creates logs at the configured rate | Met | Browser: a $64 logger produced its first log after about 4 s (tier-0 interval). Faster upgrade tiers are data-only and not timed in a browser. |
+| 3 | Logs respond consistently to gravity and collisions | Partial | Fixed 60 Hz steps, so frame-rate independent by design; observed stable in browser. Tab-inactive behavior and long-run stability not tested. |
+| 4 | Manual dragging applies a force limit and controls no more than one log | Met | Browser: one log grabbed per press; a log pulled hard into the floor did not tunnel through. Pushing a stack of logs with the dragged one was not specifically tested. |
+| 5 | Equipment can be purchased, placed, selected, upgraded, and removed | Partial | Purchase, placement and selection verified in browser. Upgrade, remove and undo are covered by tests, and the panel renders correctly, but I did not click the Upgrade/Remove buttons in a browser. No repositioning (the spec mentions it); rotation was added instead. |
+| 6 | Invalid placements do not deduct money | Met | Browser (lake, no-build zone) and tests (all refusal reasons). |
+| 7 | Lakes and restricted areas prevent construction | Met | Browser and tests. Lakes and the furnace block their whole column, not just the floor. |
+| 8 | Logs entering the furnace are rewarded exactly once | Met | Browser (payout once per log) and tests (`LogRegistry` state machine plus a second guard in `Economy`). |
+| 9 | Logs lost in water cannot subsequently be delivered or rewarded | Partial | Tests prove a lost log can never become delivered. I did not watch a log fall into the lake in a browser run. |
+| **Economy and objectives** | | | |
+| 10 | Rewards, upgrade prices and cash balances remain consistent | Met | Tests cover buy, upgrade, refund (80% of price plus upgrades) and undo round trips. |
+| 11 | The rolling one-second delivery counter counts unique logs | Met | Tests. Uniqueness comes from `LogRegistry`. Not observed in a browser. |
+| 12 | Streak multipliers activate at the configured thresholds | Partial | Tests only (x1.1 / x1.25 / x1.5 / x2.0). I could not deliver several logs inside one second by hand to see it in a browser. Ambiguity: the spec's table is by deliveries in the window; I followed the author's README rule that a log is paid from the count *before* it joins the window. |
+| 13 | Timed objectives pause correctly when paused | Not met | No timed objectives. General simulation time (including regrowth, loggers and the streak window) does freeze on pause. |
+| 14 | No-loss objectives fail or succeed per documented rules | Not met | No objectives framework yet. |
+| 15 | Objective progress is restored correctly when appropriate | Not met | No objectives and no save data. |
+| **Campaign** | | | |
+| 16 | All three levels are playable start to finish | Not met | Only "The First Haul" exists. At the user's request it ends with a win screen at $1500 earned instead of campaign objectives. |
+| 17 | Each level demonstrates its intended mechanics | Partial | Level 1 has the tree, drag, shop, lake and no-build zone. Birds and fish are not built. |
+| 18 | Completion and secondary objectives are recorded | Not met | No persistence. |
+| 19 | Resetting an attempt does not corrupt persistent progression | Not applicable yet | There is no persistent progression; reset restarts the in-memory attempt. |
+| **Level editor** | | | |
+| 20 | Users can create and configure levels | Not met | Not started (spec Phase 5). |
+| 21 | Undo and redo work for supported editing operations | Not met | Editor not built. (The in-game build undo, `Z`, works; there is no redo.) |
+| 22 | Test mode can be entered and exited repeatedly | Not met | Editor not built. |
+| 23 | Saved levels can be reloaded without losing configuration | Not met | Editor not built. |
+| 24 | Exported JSON can be imported | Not met | Editor not built. |
+| 25 | Invalid files are rejected safely with useful messages | Not met | Editor not built. |
+| 26 | Custom levels do not corrupt campaign saves | Not applicable yet | Neither exists. |
+| **Interface and polish** | | | |
+| 27 | The game works at common desktop resolutions | Partial | The canvas scales to fit; checked around 1400x900 and a small window only. |
+| 28 | Tooltips and costs are readable | Partial | Prices are on the shop buttons and upgrade cost and effect show before buying; tooltips are plain browser `title` text. |
+| 29 | Audio controls function | Not met | There is no audio at all. |
+| 30 | Important actions provide clear feedback | Partial | Floating money text, refusal messages, streak banner, spark bursts. No sound. |
+| 31 | No obvious placeholder screens, broken assets or nonfunctional buttons | Partial | No dead buttons, and all art is drawn in code. But there is no main menu, settings or credits screen (spec section 16). |
+
+**Where the spec itself was unclear or conflicting:** section 20 asks for "Objective progress restored", but nothing in the spec says when progress should persist across attempts. The spec also says refunds default to 80% "before an attempt is finalized", but "finalized" is never defined; I treated every removal as refundable at 80%. The README's phase notes claimed levels 2 and 3, a level editor and 23 tests existed, but none of that code was in the repository (see the status section at the top).
 
 ## Known issues and traps
 - `LogworksScene` sets `matter.world.autoUpdate = false` and steps Matter by hand; do not also let Phaser auto-step.
