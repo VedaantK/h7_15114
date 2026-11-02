@@ -4,6 +4,7 @@
  */
 export class Economy {
   private balance: number;
+  private earnedTotal = 0;
   private readonly startingCash: number;
   private readonly logValue: number;
   private readonly rewardedLogIds = new Set<number>();
@@ -19,16 +20,23 @@ export class Economy {
     return this.balance;
   }
 
+  /** Sum of delivery rewards this attempt. Spending and refunds never change it; the win condition uses it. */
+  get totalEarned(): number {
+    return this.earnedTotal;
+  }
+
   /**
    * Pay out for a delivered log. Returns the amount paid, or 0 if this log was already rewarded.
    * This is a second safety net; LogRegistry.markDelivered is the primary exactly-once gate.
-   * TODO(phase 3): apply the rolling-throughput multiplier here.
+   * `multiplier` is the streak multiplier chosen by the Throughput system; the payout is rounded to whole dollars.
    */
-  rewardDelivery(logId: number): number {
+  rewardDelivery(logId: number, multiplier = 1): number {
     if (this.rewardedLogIds.has(logId)) return 0;
     this.rewardedLogIds.add(logId);
-    this.balance += this.logValue;
-    return this.logValue;
+    const paid = Math.round(this.logValue * multiplier);
+    this.balance += paid;
+    this.earnedTotal += paid;
+    return paid;
   }
 
   /** Spend cash if affordable. Returns false (and charges nothing) otherwise. */
@@ -45,6 +53,7 @@ export class Economy {
 
   reset(): void {
     this.balance = this.startingCash;
+    this.earnedTotal = 0;
     this.rewardedLogIds.clear();
   }
 }

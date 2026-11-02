@@ -155,3 +155,42 @@ test('trampoline launches along its normal; rotated pad aims the launch', () => 
   assert.ok(aimed.x > 6 && aimed.y < -6);
   assert.equal(trampolineLaunchVelocity(pad, 90, 16, 10, { x: 400, y: 572 }, { x: 0, y: -8 }), null, 'already rising');
 });
+
+test('rotate: free, turns 45 degrees, wraps, undoable', () => {
+  const { eco, mgr } = fresh(500);
+  const { item } = mgr.tryPlace('trampoline', 300, 520, 0);
+  const cash = eco.cash;
+  assert.equal(mgr.tryRotate(item.id).ok, true);
+  assert.equal(item.rotationStep, 1);
+  assert.equal(eco.cash, cash, 'rotation is free');
+  for (let i = 0; i < 7; i++) mgr.tryRotate(item.id);
+  assert.equal(item.rotationStep, 0, 'wraps after 8 steps');
+  assert.equal(mgr.undo().ok, true);
+  assert.equal(item.rotationStep, 7);
+});
+
+test('rotate: a tool on the floor is lifted just enough to clear the ground, and undo drops it back', () => {
+  const { mgr } = fresh(500);
+  const flat = mgr.tryPlace('trampoline', 300, L.groundTopY - 9, 0).item;
+  assert.equal(mgr.tryRotate(flat.id).ok, true);
+  assert.equal(flat.rotationStep, 1);
+  assert.ok(flat.y < L.groundTopY - 9, 'lifted');
+  assert.equal(checkPlacement(L, [flat], 'trampoline', flat.x, flat.y, 1, flat.id), null, 'new spot is valid');
+  mgr.undo();
+  assert.deepEqual([flat.rotationStep, flat.y], [0, L.groundTopY - 9]);
+});
+
+test('rotate: refused (and tool left untouched) if the lifted, rotated footprint would hit another tool', () => {
+  const { mgr } = fresh(1000);
+  const belt = mgr.tryPlace('conveyor', 300, GROUND_Y, 0).item;
+  assert.equal(mgr.tryPlace('fan', 300, 520, 0).ok, true); // clear of the flat belt, in the way of a rotated one
+  assert.deepEqual(mgr.tryRotate(belt.id), { ok: false, reason: 'overlap' });
+  assert.deepEqual([belt.rotationStep, belt.y], [0, GROUND_Y]);
+});
+
+test('rotate: loggers and unknown ids are refused', () => {
+  const { mgr } = fresh(1000);
+  const logger = mgr.tryPlace('logger', 200, L.groundTopY - 35, 0).item;
+  assert.deepEqual(mgr.tryRotate(logger.id), { ok: false, reason: 'fixed' });
+  assert.deepEqual(mgr.tryRotate(999), { ok: false, reason: 'missing' });
+});

@@ -17,6 +17,18 @@ export const FIRST_HAUL: LevelConfig = {
   logValue: 18,
   maxActiveLogs: 22,
   gravityY: 1,
+  // Large enough that it takes real machinery: ~84 plain deliveries, fewer with streak bonuses.
+  winEarnings: 1500,
+  // Spec section 11 defaults. The multiplier a log gets is chosen from the deliveries ALREADY in the
+  // window when it arrives (README Phase 3 rule), so the 5th log of a burst pays x1.5 and the 6th x2.0.
+  throughputTiers: [
+    { minDeliveries: 0, multiplier: 1.0 },
+    { minDeliveries: 2, multiplier: 1.1 },
+    { minDeliveries: 3, multiplier: 1.25 },
+    { minDeliveries: 4, multiplier: 1.5 },
+    { minDeliveries: 5, multiplier: 2.0 },
+  ],
+  throughputWindowMs: 1000,
   refundRate: 0.8,
   availableEquipment: ['conveyor', 'fan', 'trampoline', 'logger'],
   // A 120px lake gap (logs are 64px long, so one can't simply be dropped across it) ...

@@ -1,7 +1,8 @@
 import Phaser from 'phaser';
-import type { EquipmentKind, HudState, LevelConfig, PlacedEquipment, SelectedInfo } from '../types/game';
+import type { EquipmentKind, HudState, LevelConfig, PlacedEquipment, SelectedInfo, WinSummary } from '../types/game';
 import { Economy } from '../systems/Economy';
 import { LogRegistry } from '../systems/LogRegistry';
+import { Throughput } from '../systems/Throughput';
 import { TreeSupply } from '../systems/TreeSupply';
 import { EQUIPMENT_CATALOG, EquipmentManager, GRID_SNAP_PX, REASON_TEXT, ROTATION_STEPS, footprintBounds, statLines, statsOf, upgradePreview } from '../systems/Equipment';
 import { conveyorVelocityDelta, fanAcceleration, angleOf, trampolineLaunchVelocity } from '../systems/EquipmentEffects';
@@ -31,13 +32,20 @@ export interface SceneInit {
  *   listens 'cmd:pause'  toggle pause
  *   listens 'cmd:reset'  restart this attempt (including cash)
  *   listens 'cmd:build'   (kind | null) enter/leave build mode for a tool
- *   listens 'cmd:upgrade' / 'cmd:remove' / 'cmd:undo'  act on the selected tool / last build action
+ *   listens 'cmd:upgrade' / 'cmd:remove' / 'cmd:rotate' / 'cmd:undo'  act on the selected tool / last build action
+ *   listens 'cmd:continue' dismiss the win screen and keep playing
  */
 export class LogworksScene extends Phaser.Scene {
   private level!: LevelConfig;
   private registry_!: LogRegistry; // trailing underscore: `registry` is a Phaser.Scene property.
   private economy!: Economy;
   private tree!: TreeSupply;
+  private throughput!: Throughput;
+  /** Set once total earnings reach the goal; `winDismissed` lets the player keep playing afterwards. */
+  private won: WinSummary | null = null;
+  private winDismissed = false;
+  private bestMultiplier = 1;
+  private furnaceGraphics!: Phaser.GameObjects.Graphics;
 
   /** Simulation clock in ms. Advances only while unpaused, in whole STEP_MS increments. */
   private simTimeMs = 0;
@@ -86,6 +94,7 @@ export class LogworksScene extends Phaser.Scene {
     this.buildWorld();
     this.buildTree();
     this.buildFurnaceVisuals();
+    this.furnaceGraphics = this.add.graphics().setDepth(3);
     this.equipGraphics = this.add.graphics().setDepth(6);
     this.previewGraphics = this.add.graphics().setDepth(25);
     this.dragGraphics = this.add.graphics().setDepth(20);
@@ -102,12 +111,18 @@ export class LogworksScene extends Phaser.Scene {
     const onUpgrade = (): void => this.upgradeSelected();
     const onRemove = (): void => this.removeSelected();
     const onUndo = (): void => this.undoLast();
+    const onRotate = (): void => this.rotateSelected();
+    const onContinue = (): void => {
+      this.winDismissed = true;
+    };
     this.game.events.on('cmd:pause', onPause);
     this.game.events.on('cmd:reset', onReset);
     this.game.events.on('cmd:build', onBuild);
     this.game.events.on('cmd:upgrade', onUpgrade);
     this.game.events.on('cmd:remove', onRemove);
     this.game.events.on('cmd:undo', onUndo);
+    this.game.events.on('cmd:rotate', onRotate);
+    this.game.events.on('cmd:continue', onContinue);
     // Remove listeners when the scene restarts so resets never stack duplicate handlers (spec section 19).
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.game.events.off('cmd:pause', onPause);
@@ -116,13 +131,17 @@ export class LogworksScene extends Phaser.Scene {
       this.game.events.off('cmd:upgrade', onUpgrade);
       this.game.events.off('cmd:remove', onRemove);
       this.game.events.off('cmd:undo', onUndo);
+      this.game.events.off('cmd:rotate', onRotate);
+      this.game.events.off('cmd:continue', onContinue);
     });
 
     this.emitHud();
   }
 
   update(_time: number, deltaMs: number): void {
-    if (!this.paused) {
+    // The simulation freezes while the win screen is up, and resumes if the player keeps playing.
+    const frozen = this.won !== null && !this.winDismissed;
+    if (!this.paused && !frozen) {
       this.accumulatorMs += Math.min(deltaMs, STEP_MS * MAX_STEPS_PER_FRAME);
       let steps = 0;
       while (this.accumulatorMs >= STEP_MS && steps < MAX_STEPS_PER_FRAME) {
@@ -133,6 +152,7 @@ export class LogworksScene extends Phaser.Scene {
     }
     this.drawDragIndicator();
     this.drawEquipmentLayer();
+    this.drawFurnaceAnimation();
     this.emitHud();
   }
 
@@ -207,10 +227,25 @@ export class LogworksScene extends Phaser.Scene {
   private deliverLog(id: number, x: number, y: number): void {
     // markDelivered is the exactly-once gate: it is true only for the first call per log.
     if (!this.registry_.markDelivered(id)) return;
-    const paid = this.economy.rewardDelivery(id);
+    const multiplier = this.throughput.recordDelivery(this.simTimeMs);
+    const paid = this.economy.rewardDelivery(id, multiplier);
     this.deliveredCount++;
     this.removeLog(id);
-    this.floatText(x, y - 20, `+$${paid}`, '#ffd166');
+    this.floatText(x, y - 20, multiplier > 1 ? `+$${paid} (x${multiplier})` : `+$${paid}`, multiplier > 1 ? '#7dffb0' : '#ffd166');
+    this.furnaceBurst(multiplier);
+    // Announce a streak tier the first time it is reached in a burst of deliveries.
+    if (multiplier > this.bestMultiplier) {
+      this.bestMultiplier = multiplier;
+      this.floatText(this.level.furnace.mouth.x, this.level.groundTopY - 70, `STREAK x${multiplier}!`, '#7dffb0');
+    }
+    if (this.won === null && this.economy.totalEarned >= this.level.winEarnings) {
+      this.won = {
+        delivered: this.deliveredCount,
+        earned: this.economy.totalEarned,
+        bestMultiplier: this.bestMultiplier,
+        timeSeconds: Math.round(this.simTimeMs / 1000),
+      };
+    }
   }
 
   private loseLog(id: number): void {
@@ -258,6 +293,7 @@ export class LogworksScene extends Phaser.Scene {
     this.input.keyboard?.on('keydown-R', () => this.scene.restart({ level: this.level }));
     this.input.keyboard?.on('keydown-E', () => {
       if (this.buildKind) this.buildRotation = (this.buildRotation + 1) % ROTATION_STEPS;
+      else this.rotateSelected();
     });
     this.input.keyboard?.on('keydown-ESC', () => {
       if (this.buildKind) this.setBuildKind(null);
@@ -312,6 +348,10 @@ export class LogworksScene extends Phaser.Scene {
     this.registry_ = new LogRegistry();
     this.economy = new Economy(this.level.startingCash, this.level.logValue);
     this.tree = new TreeSupply(this.level.tree);
+    this.throughput = new Throughput(this.level.throughputTiers, this.level.throughputWindowMs);
+    this.won = null;
+    this.winDismissed = false;
+    this.bestMultiplier = 1;
     this.simTimeMs = 0;
     this.accumulatorMs = 0;
     this.paused = false;
@@ -463,6 +503,16 @@ export class LogworksScene extends Phaser.Scene {
     }
   }
 
+  private rotateSelected(): void {
+    if (this.selectedId === null) return;
+    const result = this.equipment.tryRotate(this.selectedId);
+    if (!result.ok) {
+      this.showMessage(result.reason === 'fixed' ? "This tool can't rotate" : result.reason === 'missing' ? 'Nothing selected' : `Can't rotate here: ${REASON_TEXT[result.reason]}`, 1800);
+      return;
+    }
+    this.syncEquipment();
+  }
+
   private removeSelected(): void {
     if (this.selectedId === null) return;
     const item = this.equipment.get(this.selectedId);
@@ -492,6 +542,12 @@ export class LogworksScene extends Phaser.Scene {
     for (const [id, item] of live) {
       if (item.kind === 'logger' && !this.loggerState.has(id)) this.loggerState.set(id, { elapsedMs: 0, status: 'Working', workingUntilMs: 0 });
       // Conveyors and trampolines are solid so logs rest on them; fans and loggers are not.
+      // A rotated tool needs a fresh body: static body angles are set at creation.
+      const existing = this.equipBodies.get(id);
+      if (existing && Math.abs(existing.angle - angleOf(item.rotationStep)) > 1e-6) {
+        this.matter.world.remove(existing);
+        this.equipBodies.delete(id);
+      }
       if ((item.kind === 'conveyor' || item.kind === 'trampoline') && !this.equipBodies.has(id)) {
         const spec = EQUIPMENT_CATALOG[item.kind];
         const body = this.matter.add.rectangle(item.x, item.y, spec.width, spec.height, {
@@ -608,9 +664,51 @@ export class LogworksScene extends Phaser.Scene {
       statLines: statLines(item),
       upgradeLine: preview ? preview.line : null,
       upgradeCost: preview ? preview.cost : null,
+      rotatable: this.equipment.isRotatable(item.kind),
       refund: this.equipment.refundFor(item.id),
       status: logger ? logger.status : '',
     };
+  }
+
+  // ---------------------------------------------------------------- furnace polish
+
+  /** Animated flames and a pulsing glow above the pit. Driven by simulation time so it freezes on pause. */
+  private drawFurnaceAnimation(): void {
+    const { pit, mouth } = this.level.furnace;
+    const g = this.furnaceGraphics;
+    g.clear();
+    const t = this.simTimeMs;
+    const left = pit.x - pit.width / 2;
+    const glow = 0.14 + 0.06 * Math.sin(t * 0.006);
+    g.fillStyle(0xff9a3c, glow).fillRect(left - 10, this.level.groundTopY - 50, pit.width + 20, 50);
+    g.fillStyle(0xff9a3c, glow * 0.6).fillRect(left - 24, this.level.groundTopY - 90, pit.width + 48, 40);
+    const baseY = mouth.y - 8;
+    const flames = 6;
+    for (let i = 0; i < flames; i++) {
+      const cx = left + 18 + (i * (pit.width - 36)) / (flames - 1);
+      const height = 20 + 10 * Math.sin(t * 0.012 + i * 1.7) + 6 * Math.sin(t * 0.021 + i);
+      const sway = 5 * Math.sin(t * 0.009 + i * 2.3);
+      g.fillStyle(0xff5a1f, 0.95).fillTriangle(cx - 11, baseY, cx + 11, baseY, cx + sway, baseY - height);
+      g.fillStyle(0xffd24a, 0.95).fillTriangle(cx - 6, baseY, cx + 6, baseY, cx + sway * 0.6, baseY - height * 0.62);
+    }
+  }
+
+  /** Sparks fly out of the furnace on delivery; a bigger streak multiplier means a bigger burst. */
+  private furnaceBurst(multiplier: number): void {
+    const { mouth } = this.level.furnace;
+    const count = Math.round(8 + (multiplier - 1) * 14);
+    for (let i = 0; i < count; i++) {
+      const color = Math.random() < 0.5 ? 0xffd24a : 0xff7a2f;
+      const spark = this.add.circle(mouth.x + (Math.random() - 0.5) * 60, this.level.groundTopY - 4, 2 + Math.random() * 3, color).setDepth(28);
+      this.tweens.add({
+        targets: spark,
+        x: spark.x + (Math.random() - 0.5) * 120,
+        y: spark.y - 40 - Math.random() * 70,
+        alpha: 0,
+        duration: 450 + Math.random() * 300,
+        onComplete: () => spark.destroy(),
+      });
+    }
   }
 
   // ---------------------------------------------------------------- feedback / HUD
@@ -665,6 +763,11 @@ export class LogworksScene extends Phaser.Scene {
       message: this.message,
       buildKind: this.buildKind,
       canUndo: this.equipment.canUndo(),
+      earned: this.economy.totalEarned,
+      goal: this.level.winEarnings,
+      multiplier: this.throughput.currentMultiplier(this.simTimeMs),
+      recentDeliveries: this.throughput.countInWindow(this.simTimeMs),
+      won: this.won !== null && !this.winDismissed ? this.won : null,
       selected: this.selectedInfo(),
     };
     this.game.events.emit('hud', state);

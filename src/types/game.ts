@@ -58,6 +58,20 @@ export interface PlacedEquipment {
   spent: number;
 }
 
+/** One step of the streak multiplier: with at least `minDeliveries` logs already delivered in the window, pay `multiplier`. */
+export interface ThroughputTier {
+  minDeliveries: number;
+  multiplier: number;
+}
+
+/** Shown on the win screen. */
+export interface WinSummary {
+  delivered: number;
+  earned: number;
+  bestMultiplier: number;
+  timeSeconds: number;
+}
+
 export interface LevelConfig {
   id: string;
   title: string;
@@ -69,6 +83,11 @@ export interface LevelConfig {
   maxActiveLogs: number;
   gravityY: number;
   /** Fraction of `spent` returned when removing equipment (spec section 8: default 0.8). */
+  /** Win when total earned from deliveries (not current cash, so spending never hurts) reaches this. */
+  winEarnings: number;
+  /** Rolling-window streak multiplier thresholds, ascending by minDeliveries (spec section 11). */
+  throughputTiers: ThroughputTier[];
+  throughputWindowMs: number;
   refundRate: number;
   availableEquipment: EquipmentKind[];
   /** Gaps in the floor that destroy logs and forbid building (full column). Center-based rects. */
@@ -93,6 +112,7 @@ export interface SelectedInfo {
   statLines: string[];
   upgradeLine: string | null;
   upgradeCost: number | null;
+  rotatable: boolean;
   refund: number;
   status: string;
 }
@@ -109,5 +129,11 @@ export interface HudState {
   message: string;
   buildKind: EquipmentKind | null;
   canUndo: boolean;
+  earned: number;
+  goal: number;
+  /** Multiplier the next delivery would receive, and deliveries currently in the rolling window. */
+  multiplier: number;
+  recentDeliveries: number;
+  won: WinSummary | null;
   selected: SelectedInfo | null;
 }

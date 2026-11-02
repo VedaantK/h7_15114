@@ -16,6 +16,8 @@ app.innerHTML = `
     <h1 id="title"></h1>
     <span class="stat">Cash <b id="cash">$0</b></span>
     <span class="stat">Delivered <b id="delivered">0</b></span>
+    <span class="stat" title="Total earned from deliveries; reach the goal to win">Earned <b id="earned">$0</b></span>
+    <span class="stat" title="Streak multiplier from deliveries in the last second">Streak <b id="streak">x1.0</b></span>
     <span class="stat">Logs <b id="logs">0</b></span>
     <span class="stat">Wood <b id="wood">0</b></span>
     <span class="spacer"></span>
@@ -30,6 +32,12 @@ app.innerHTML = `
   </section>
   <div id="toast" role="status" aria-live="polite"></div>
   <div id="game"></div>
+  <dialog id="winDialog">
+    <h2>You win!</h2>
+    <p id="winText"></p>
+    <button id="winContinue" type="button">Keep playing</button>
+    <button id="winAgain" type="button">Play again</button>
+  </dialog>
   <dialog id="helpDialog">
     <h2>How to play</h2>
     <ul>
@@ -37,7 +45,8 @@ app.innerHTML = `
       <li><b>Click and drag a log</b> to pull it. The pull is force-limited: you can't shove logs through walls or move several at once.</li>
       <li>Get logs into the <b>furnace pit</b> on the right to earn cash. Logs that fall in the lake are lost.</li>
       <li><b>Shop:</b> pick a tool, then click the map to place it (green = OK, red = blocked; refused placements never cost cash). <b>E</b> rotates, <b>Esc</b> or right-click cancels.</li>
-      <li><b>Click a placed tool</b> to see its stats, upgrade it (3 tiers) or remove it for an 80% refund. <b>Z</b> undoes your last build action, <b>Delete</b> removes the selected tool.</li>
+      <li><b>Click a placed tool</b> to see its stats, upgrade it (3 tiers), rotate it (<b>E</b>) or remove it for an 80% refund. <b>Z</b> undoes your last build action, <b>Delete</b> removes the selected tool.</li>
+      <li><b>Streak:</b> deliver several logs within one second for bigger payouts (up to x2). <b>Goal:</b> earn the target amount from deliveries to win.</li>
       <li><b>P</b> pauses, <b>R</b> restarts the attempt.</li>
     </ul>
     <button id="helpClose" type="button">Got it</button>
@@ -46,18 +55,23 @@ app.innerHTML = `
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 $('title').textContent = FIRST_HAUL.title;
+const winDialog = $<HTMLDialogElement>('winDialog');
+
+// Dev/testing aid: `?goal=100` lowers the win target so the win screen can be reached quickly.
+const goalOverride = Number(new URLSearchParams(location.search).get('goal'));
+const level = goalOverride > 0 ? { ...FIRST_HAUL, winEarnings: goalOverride } : FIRST_HAUL;
 
 const game = new Phaser.Game({
   type: Phaser.AUTO,
   parent: 'game',
-  width: FIRST_HAUL.world.width,
-  height: FIRST_HAUL.world.height,
+  width: level.world.width,
+  height: level.world.height,
   backgroundColor: '#102d2e',
   scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH },
   physics: { default: 'matter', matter: { gravity: { x: 0, y: FIRST_HAUL.gravityY }, debug: false } },
   scene: [],
 });
-game.scene.add('LogworksScene', LogworksScene, true, { level: FIRST_HAUL });
+game.scene.add('LogworksScene', LogworksScene, true, { level });
 
 // --- shop buttons (built once from the catalog) ---
 const shop = $('shop');
@@ -102,6 +116,12 @@ function renderPanel(sel: SelectedInfo | null, cash: number): void {
     up.disabled = cash < sel.upgradeCost;
   }
   up.addEventListener('click', () => game.events.emit('cmd:upgrade'));
+  const rot = document.createElement('button');
+  rot.type = 'button';
+  rot.textContent = 'Rotate (E)';
+  rot.disabled = !sel.rotatable;
+  rot.title = sel.rotatable ? 'Turn 45 degrees clockwise (free)' : 'This tool cannot rotate';
+  rot.addEventListener('click', () => game.events.emit('cmd:rotate'));
   const rm = document.createElement('button');
   rm.type = 'button';
   rm.textContent = `Remove (+$${sel.refund})`;
@@ -113,7 +133,7 @@ function renderPanel(sel: SelectedInfo | null, cash: number): void {
     next.textContent = `Next: ${sel.upgradeLine}`;
     panel.append(next);
   }
-  panel.append(up, rm);
+  panel.append(up, rot, rm);
 }
 
 game.events.on('hud', (s: HudState) => {
@@ -127,6 +147,12 @@ game.events.on('hud', (s: HudState) => {
   renderPanel(s.selected, s.cash);
   $('cash').textContent = `$${s.cash}`;
   $('delivered').textContent = String(s.delivered);
+  $('earned').textContent = `$${s.earned}/$${s.goal}`;
+  $('streak').textContent = `x${s.multiplier.toFixed(2).replace(/0$/, '')}${s.recentDeliveries > 0 ? ` (${s.recentDeliveries}/s)` : ''}`;
+  if (s.won && !winDialog.open) {
+    $('winText').textContent = `You earned $${s.earned} from ${s.won.delivered} logs in ${s.won.timeSeconds}s of play. Best streak multiplier: x${s.won.bestMultiplier}.`;
+    winDialog.showModal();
+  }
   $('logs').textContent = `${s.activeLogs}/${s.maxActiveLogs}`;
   $('wood').textContent = `${s.wood}/${s.woodCapacity}`;
   $('pause').textContent = s.paused ? 'Resume (P)' : 'Pause (P)';
@@ -141,3 +167,14 @@ $('helpClose').addEventListener('click', () => helpDialog.close());
 window.addEventListener('keydown', (e) => {
   if (e.key === '?') helpDialog.showModal();
 });
+
+$('winContinue').addEventListener('click', () => {
+  winDialog.close();
+  game.events.emit('cmd:continue');
+});
+$('winAgain').addEventListener('click', () => {
+  winDialog.close();
+  game.events.emit('cmd:reset');
+});
+// Esc on the win dialog behaves like "Keep playing" so the game is never left frozen behind a closed dialog.
+winDialog.addEventListener('cancel', () => game.events.emit('cmd:continue'));

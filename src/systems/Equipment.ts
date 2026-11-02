@@ -183,7 +183,10 @@ export type UpgradeResult = { ok: true } | { ok: false; reason: 'missing' | 'max
 type UndoOp =
   | { type: 'place'; id: number }
   | { type: 'upgrade'; id: number; cost: number }
-  | { type: 'remove'; item: PlacedEquipment; refund: number };
+  | { type: 'remove'; item: PlacedEquipment; refund: number }
+  | { type: 'rotate'; id: number; prevY: number };
+
+export type RotateResult = { ok: true } | { ok: false; reason: PlacementReason | 'fixed' | 'missing' };
 
 /**
  * Owns the placed tools and every cash transaction involving them.
@@ -242,6 +245,36 @@ export class EquipmentManager {
     return { ok: true };
   }
 
+  /** Whether a tool's orientation matters (loggers are fixed). */
+  isRotatable(kind: EquipmentKind): boolean {
+    return kind !== 'logger';
+  }
+
+  /**
+   * Turn a placed tool 45 degrees clockwise, free of charge, if the rotated footprint still fits.
+   * A tilted tool sitting on the floor would dip underground, so in that one case it is lifted
+   * (in whole grid steps) just enough to clear the ground, instead of refusing the rotation.
+   */
+  tryRotate(id: number): RotateResult {
+    const item = this.items.get(id);
+    if (!item) return { ok: false, reason: 'missing' };
+    if (!this.isRotatable(item.kind)) return { ok: false, reason: 'fixed' };
+    const next = (item.rotationStep + 1) % ROTATION_STEPS;
+    const prevY = item.y;
+    let newY = item.y;
+    let blocked = checkPlacement(this.level, this.items.values(), item.kind, item.x, newY, next, id);
+    if (blocked === 'ground') {
+      const overshoot = footprintBounds(item.kind, item.x, newY, next).bottom - this.level.groundTopY;
+      newY -= Math.ceil(overshoot / GRID_SNAP_PX) * GRID_SNAP_PX;
+      blocked = checkPlacement(this.level, this.items.values(), item.kind, item.x, newY, next, id);
+    }
+    if (blocked) return { ok: false, reason: blocked };
+    item.rotationStep = next;
+    item.y = newY;
+    this.undoStack.push({ type: 'rotate', id, prevY });
+    return { ok: true };
+  }
+
   /** What removing this tool would pay back right now. */
   refundFor(id: number): number {
     const item = this.items.get(id);
@@ -274,6 +307,15 @@ export class EquipmentManager {
         this.economy.earn(item.spent);
       }
       return { ok: true, text: 'Undid placement (full refund)' };
+    }
+    if (op.type === 'rotate') {
+      const item = this.items.get(op.id);
+      this.undoStack.pop();
+      if (item) {
+        item.rotationStep = (item.rotationStep + ROTATION_STEPS - 1) % ROTATION_STEPS;
+        item.y = op.prevY;
+      }
+      return { ok: true, text: 'Undid rotation' };
     }
     if (op.type === 'upgrade') {
       const item = this.items.get(op.id);

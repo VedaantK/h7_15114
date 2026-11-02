@@ -21,3 +21,13 @@ Unwanted / mistakes this round:
 4. **Left junk in generated code.** A placeholder line (`state.simulatedWorking ? 'Working' : 'Working'`) referencing a field that did not exist; typecheck caught it and it was removed.
 5. **Wrong test, not wrong code.** A unit test expected a blocked undo that the API cannot produce (undo correctly reversed the latest action). The test was rewritten to cover the real failure case (buy-back unaffordable).
 6. **Misread browser tests.** Two "trampoline did nothing" results came from the test script toggling build mode off and from dropping a log on the pad's underside, not from game bugs. Confirmed by re-running with controlled setups.
+
+## Prompt 3 (verbatim)
+> Just make a win screen for a pretty large money total, no need for levels. YOu can add the multiplier and the polish too. Can you also add the ability to rotate objects. Then when all that is done push it to my github
+
+What the AI did: added `Throughput.ts`, the win dialog, furnace flames/sparks, rotating placed tools, and 10 more tests.
+
+Unwanted / mistakes this round:
+7. **First rotate design was frustrating.** A conveyor lying on the floor could not be rotated at all (its tilted corner would dip underground). Noticed in the browser, changed so rotation lifts the tool just enough, with undo restoring its height.
+8. **Test arithmetic errors.** One throughput test assumed a delivery exactly 1000ms old is still in the window; the code (correctly) excludes it. The test was fixed, not the code. A rotation test with conditional assertions was replaced with a deterministic one.
+9. **Misjudged an undo count** while reading a browser run; re-running the exact sequence showed 3 actions = 3 undos, so no code change.

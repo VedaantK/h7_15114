@@ -8,7 +8,7 @@ Original author: ISamanie (design, spec, README, config). Phase 2 build: Vedaant
 The inherited commit (`e64f54c`) had `spec.md`, `README.md`, `package.json`, `tsconfig.json`, `index.html` and `package-lock.json`, but **no `src/` or `tests/` directory**. The README below describes Phases 1-6 as implemented (23 tests, a level creator, a 3-level campaign), and none of that code was in the repo. Treat the Phase 2-6 sections below as the author's *plan*, not as a description of existing code.
 
 ## What exists now (Phases 1 and 2, built from the README's own module map)
-Verified by `npm run typecheck`, `npm test` (21 passing unit tests), `npm run build`, and manual browser runs (Playwright, Chromium):
+Verified by `npm run typecheck`, `npm test` (31 passing unit tests), `npm run build`, and manual browser runs (Playwright, Chromium):
 - Click the tree to spawn a log (250 ms cooldown, 8 wood, regrows 1 per 3 s of simulation time, 22 active-log cap with an on-screen message).
 - Click and drag a single log. The pull is a force-limited damped spring (`drag` in `src/config/levels.ts`). It was pulled straight down into the floor without passing through, so collisions still win.
 - Furnace pit on the right. A log whose center enters the delivery mouth is removed and pays $18 exactly once (`LogRegistry` is the gate, `Economy` the second check).
@@ -24,7 +24,13 @@ Verified by `npm run typecheck`, `npm test` (21 passing unit tests), `npm run bu
 - Level 1 now has a 120px lake gap (logs that fall in are lost, with a splash) and a hatched NO BUILD zone.
 - Verified in the browser: invalid placements charged nothing; trampoline launched a log; conveyor carried a log; fan blew a log about 150px further than it would have gone; logger produced its first log after about 4s.
 
-Not browser-tested: pause/reset buttons, the help dialog, the 22-log cap message, upgrade/remove/undo buttons in the UI (covered by unit tests only), tab-inactive behavior, 60 FPS under load, and whether level 1 is comfortably solvable with the starting $200 (balance is a guess).
+**Added after Phase 2 (requested by the user, not from the author's phase list):**
+- **Win screen, no levels:** the game ends with a "You win!" dialog once total *earned from deliveries* reaches `winEarnings` ($1500 in `src/config/levels.ts`; spending and refunds do not affect it). "Keep playing" resumes, "Play again" restarts. Open the game with `?goal=40` to lower the target for testing.
+- **Throughput multiplier** (`src/systems/Throughput.ts`): spec thresholds x1.0 / x1.1 (2) / x1.25 (3) / x1.5 (4) / x2.0 (5+) in a rolling 1-second window of simulation time. Following the author's Phase 3 rule, a log is paid using the deliveries *already* in the window when it arrives, so the 5th log of a burst pays x1.5 and the 6th x2.0. The HUD shows the multiplier the next log would get and the count in the window; the floating payout shows the multiplier; a "STREAK xN!" banner shows the first time a higher tier is reached.
+- **Furnace polish:** animated flames, pulsing glow, and a spark burst on every delivery (bigger with a higher multiplier). Driven by simulation time, so they freeze on pause.
+- **Rotate placed tools:** select a tool, then press `E` or click "Rotate (E)". Free, 45 degrees clockwise per press, undoable with `Z`. A tool resting on the floor is lifted just enough to stay above ground; a rotation that would hit another tool or a no-build zone is refused with a reason. Loggers cannot rotate.
+
+Not browser-tested: the streak multiplier (unit-tested only; I could not hand-deliver several logs within a second), pause/reset buttons, the help dialog, the 22-log cap message, upgrade/remove/undo buttons in the UI (covered by unit tests only), tab-inactive behavior, 60 FPS under load, and whether level 1 is comfortably solvable with the starting $200 (balance is a guess).
 
 ## Code map
 | File | Responsibility |
@@ -34,18 +40,19 @@ Not browser-tested: pause/reset buttons, the help dialog, the 22-log cap message
 | `src/systems/TreeSupply.ts` | Harvest cooldown, wood capacity, regrowth. Pure logic, takes simulation time. |
 | `src/systems/LogRegistry.ts` | Unique log IDs and active/delivered/lost states (forward-only). |
 | `src/systems/Economy.ts` | Cash, exactly-once delivery reward, `trySpend`, `earn` (refunds). |
+| `src/systems/Throughput.ts` | Rolling one-second delivery window and streak multiplier. |
 | `src/systems/Equipment.ts` | Equipment catalog (prices, stats, upgrade costs), placement rules (`checkPlacement`), and `EquipmentManager` (buy/upgrade/remove/undo transactions). |
 | `src/systems/EquipmentEffects.ts` | Pure per-step physics math for conveyor, fan and trampoline. Unit-tested. |
 | `src/game/EquipmentView.ts` | Drawing for tools, preview, grid, lake and no-build zone. Immediate-mode; redrawn every frame. |
 | `src/game/LogworksScene.ts` | Phaser/Matter scene: world, input, drag force, delivery check, HUD events. |
 | `src/game/assets.ts` | Procedurally drawn textures (no external assets). |
 | `src/main.ts`, `src/style.css` | HTML HUD around the canvas; talks to the scene via `game.events`. |
-| `tests/systems.test.mjs`, `tests/equipment.test.mjs` | Node tests for the framework-free systems (`npm test`). Systems avoid TS-only syntax such as parameter properties so Node can run them directly. |
+| `tests/systems.test.mjs`, `tests/equipment.test.mjs`, `tests/throughput.test.mjs` | Node tests for the framework-free systems (`npm test`). Systems avoid TS-only syntax such as parameter properties so Node can run them directly. |
 
 ## Acceptance criteria status (spec section 20)
 Met (checked in browser or unit test): tree click creates a log; automated logging creates logs at the configured interval; gravity/collisions consistent; dragging is force-limited and moves one log; equipment can be purchased, placed, selected, upgraded and removed; invalid placements do not deduct money; lakes and restricted areas prevent construction; furnace reward exactly once; lost logs cannot be rewarded (unit test).
-Partially met: "equipment can be selected, upgraded, removed" is verified by unit tests and a manual look at the panel, but the Upgrade/Remove buttons were not clicked in a browser run. Tools cannot be moved after placing (remove and re-place instead); the spec lists repositioning. Conveyors have no "maximum load" and fans no adjustable range besides upgrades.
-**Not built yet:** rolling-throughput multiplier, objectives, birds/fish, levels 2 and 3, campaign save/progression, level editor, audio, main menu. Some have `TODO(phase N)` markers in the code.
+Partially met: "equipment can be selected, upgraded, removed" is verified by unit tests and a manual look at the panel, but the Upgrade/Remove buttons were not clicked in a browser run. Tools cannot be moved after placing (remove and re-place instead, or rotate in place); the spec lists repositioning. Conveyors have no "maximum load" and fans no adjustable range besides upgrades.
+**Not built yet:** objectives, birds/fish, levels 2 and 3, campaign save/progression, level editor, audio, main menu. Some have `TODO(phase N)` markers in the code.
 
 ## Known issues and traps
 - `LogworksScene` sets `matter.world.autoUpdate = false` and steps Matter by hand; do not also let Phaser auto-step.
@@ -56,7 +63,7 @@ Partially met: "equipment can be selected, upgraded, removed" is verified by uni
 - No favicon (harmless 404 in the console).
 
 ## Suggested next steps (priority order)
-1. Phase 3: rolling one-second throughput multiplier in `Economy.rewardDelivery`, objectives framework, birds and fish.
+1. Phase 3: objectives framework (the multiplier is done), birds and fish.
 2. Play-test and balance level 1 (prices, starting cash, lake width) and click through the upgrade/remove UI.
 3. Phase 4: the other two levels, results screen, progression save.
 4. Moving placed tools, conveyor max load, tool-specific tooltips.
